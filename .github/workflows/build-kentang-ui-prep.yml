@@ -1,0 +1,88 @@
+name: Build Kentang Injector UI Prep
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate uploaded UI Prep ZIP
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ZIP files in repository:"
+          find . -maxdepth 3 -type f -iname '*.zip' -not -path './.git/*' -print
+          ZIP="$(find . -maxdepth 3 -type f -iname 'Kentang_Injector_UI_Prep_Workflow.zip' -not -path './.git/*' | head -n 1 || true)"
+          if [ -z "$ZIP" ]; then
+            echo "::error::Kentang_Injector_UI_Prep_Workflow.zip not found. Upload it to the repository root."
+            exit 1
+          fi
+          echo "zip_path=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "build-tools;35.0.0" "platform-tools"
+
+      - name: Download APKTool
+        run: |
+          curl -fL https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -o apktool.jar
+
+      - name: Extract and validate project ZIP
+        run: |
+          set -euo pipefail
+          mkdir extracted
+          unzip -q "${{ steps.locate.outputs.zip_path }}" -d extracted
+          APKTOOL_YML="$(find extracted -type f -name apktool.yml | head -n 1 || true)"
+          if [ -z "$APKTOOL_YML" ]; then
+            echo "::error::No apktool.yml found inside uploaded ZIP."
+            exit 1
+          fi
+          PROJECT_DIR="$(dirname "$APKTOOL_YML")"
+          test -f "$PROJECT_DIR/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/res/xml/settings.xml"
+          test -d "$PROJECT_DIR/smali"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Rebuild APK
+        run: java -jar apktool.jar b "$PROJECT_DIR" -o kentang-unsigned.apk
+
+      - name: Align and sign APK
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          "$BT/zipalign" -f -v 4 kentang-unsigned.apk kentang-aligned.apk
+          keytool -genkeypair -v -keystore temp-debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+          "$BT/apksigner" sign --ks temp-debug.keystore --ks-key-alias androiddebugkey \
+            --ks-pass pass:android --key-pass pass:android \
+            --out Kentang-Injector-UI-Prep.apk kentang-aligned.apk
+          "$BT/apksigner" verify --verbose Kentang-Injector-UI-Prep.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kentang-injector-ui-prep
+          path: Kentang-Injector-UI-Prep.apk
+          if-no-files-found: error
+          retention-days: 14
