@@ -1,0 +1,96 @@
+name: Build Kentang Injector From ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate uploaded project ZIP
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ZIP files found:"
+          find . -maxdepth 3 -type f -iname '*.zip' -not -path './.git/*' -print
+          ZIP="$(find . -maxdepth 3 -type f -iname 'Kentang_Injector_Baseline_Rebuild_Workflow.zip' -not -path './.git/*' | head -n 1 || true)"
+          if [ -z "$ZIP" ]; then
+            ZIP="$(find . -maxdepth 3 -type f -iname '*kentang*injector*.zip' -not -path './.git/*' | head -n 1 || true)"
+          fi
+          if [ -z "$ZIP" ]; then
+            echo "::error::Project ZIP not found. Upload Kentang_Injector_Baseline_Rebuild_Workflow.zip to the repository root."
+            exit 1
+          fi
+          echo "zip_path=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Using $ZIP"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download APKTool
+        run: |
+          set -euo pipefail
+          APKTOOL_VERSION="2.11.1"
+          curl -fL "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -o apktool.jar
+
+      - name: Extract and validate project ZIP
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          unzip -q "${{ steps.locate.outputs.zip_path }}" -d extracted
+          APKTOOL_YML="$(find extracted -type f -name apktool.yml | head -n 1 || true)"
+          if [ -z "$APKTOOL_YML" ]; then
+            echo "::error::No apktool.yml found inside ZIP. This is not the expected decoded APK project."
+            exit 1
+          fi
+          PROJECT_DIR="$(dirname "$APKTOOL_YML")"
+          test -f "$PROJECT_DIR/AndroidManifest.xml"
+          test -d "$PROJECT_DIR/smali"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Decoded project located at: $PROJECT_DIR"
+
+      - name: Rebuild APK
+        run: |
+          set -euo pipefail
+          java -jar apktool.jar b "$PROJECT_DIR" -o kentang-unsigned.apk
+
+      - name: Align and sign APK
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zipalign apksigner
+          zipalign -f -v 4 kentang-unsigned.apk kentang-aligned.apk
+          keytool -genkeypair -v \
+            -keystore temporary-debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+          apksigner sign \
+            --ks temporary-debug.keystore \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out Kentang-Injector-baseline.apk \
+            kentang-aligned.apk
+          apksigner verify --verbose Kentang-Injector-baseline.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kentang-injector-baseline-apk
+          path: Kentang-Injector-baseline.apk
+          if-no-files-found: error
+          retention-days: 14
