@@ -9,7 +9,7 @@ permissions:
 jobs:
   decompile:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
         run: |
           set -e
           APKTOOL_VERSION="2.11.1"
-          curl -L "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -o apktool.jar
+          curl -fL "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -o apktool.jar
           printf '#!/usr/bin/env bash\nexec java -jar "$(dirname "$0")/apktool.jar" "$@"\n' > apktool
           chmod +x apktool
           sudo mv apktool apktool.jar /usr/local/bin/
@@ -33,38 +33,63 @@ jobs:
         run: |
           set -e
           JADX_VERSION="1.5.1"
-          curl -L "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" -o jadx.zip
+          curl -fL "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" -o jadx.zip
           mkdir jadx
           unzip -q jadx.zip -d jadx
           echo "$GITHUB_WORKSPACE/jadx/bin" >> "$GITHUB_PATH"
 
-      - name: Verify input APK
+      - name: Find APK automatically
+        id: find_apk
+        shell: bash
         run: |
-          test -f input/kentang-injector-2.7.0.apk
-          file input/kentang-injector-2.7.0.apk
-          sha256sum input/kentang-injector-2.7.0.apk
+          set -euo pipefail
+          echo "APK files found in repository:"
+          find . -type f -iname '*.apk' -not -path './.git/*' -print
+
+          APK="$(find . -type f -iname '*kentang*injector*.apk' -not -path './.git/*' | head -n 1 || true)"
+          if [ -z "$APK" ]; then
+            APK_COUNT="$(find . -type f -iname '*.apk' -not -path './.git/*' | wc -l)"
+            if [ "$APK_COUNT" -eq 1 ]; then
+              APK="$(find . -type f -iname '*.apk' -not -path './.git/*' | head -n 1)"
+            else
+              echo "::error::APK Kentang Injector tidak ditemukan atau ada lebih dari satu APK. Letakkan APK di root repository atau folder input/, dengan nama yang mengandung 'kentang' dan 'injector'."
+              exit 1
+            fi
+          fi
+
+          mkdir -p input
+          cp "$APK" input/source.apk
+          echo "Selected APK: $APK"
+          echo "apk_path=input/source.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK
+        run: |
+          set -e
+          file input/source.apk
+          sha256sum input/source.apk
+          unzip -t input/source.apk
 
       - name: Decode resources and manifest
         run: |
-          apktool d -f input/kentang-injector-2.7.0.apk -o output/apktool
+          apktool d -f input/source.apk -o output/apktool
 
       - name: Decompile DEX to Java view
         run: |
-          jadx --show-bad-code -d output/jadx input/kentang-injector-2.7.0.apk
+          jadx --show-bad-code -d output/jadx input/source.apk
 
       - name: Save analysis metadata
         run: |
           mkdir -p output
           {
-            echo "APK: kentang-injector-2.7.0.apk"
+            echo "Source APK: ${{ steps.find_apk.outputs.apk_path }}"
             echo "SHA256:"
-            sha256sum input/kentang-injector-2.7.0.apk
+            sha256sum input/source.apk
             echo
             echo "APK entries:"
-            unzip -l input/kentang-injector-2.7.0.apk
+            unzip -l input/source.apk
           } > output/apk-metadata.txt
 
-      - name: Upload decompiled project artifacts
+      - name: Upload decompiled analysis
         uses: actions/upload-artifact@v4
         with:
           name: kentang-injector-decompiled-analysis
